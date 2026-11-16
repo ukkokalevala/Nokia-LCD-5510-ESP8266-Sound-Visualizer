@@ -1,0 +1,118 @@
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_PCD8544.h>
+
+// --- Pin Definitions ---
+#define LCD_RST D2
+#define LCD_CE  D1
+#define LCD_DC  D6
+#define LCD_DIN D7
+#define LCD_CLK D5
+#define MIC_PIN A0
+#define LED_PIN D0
+
+// Initialize display (CLK, DIN, DC, CE, RST)
+Adafruit_PCD8544 display = Adafruit_PCD8544(LCD_CLK, LCD_DIN, LCD_DC, LCD_CE, LCD_RST);
+
+// --- Visualizer Settings ---
+#define NUM_BARS 8
+#define BAR_WIDTH 6
+#define BAR_SPACING 4
+#define BAR_MAX_HEIGHT 40
+#define SCREEN_HEIGHT 48
+#define BASELINE_Y (SCREEN_HEIGHT - 1)
+
+// --- Envelope & Peak Settings ---
+int barHeights[NUM_BARS] = {0};
+int peakHeights[NUM_BARS] = {0};
+int peakTimers[NUM_BARS] = {0};
+
+const int DECAY_RATE      = 3;
+const int PEAK_DECAY_RATE = 1;
+const int PEAK_HOLD_TIME  = 6;
+
+// --- ADC / Threshold Settings ---
+const int NOISE_FLOOR     = 40;
+const int MAP_MAX_RAW     = 500;
+const int LED_THRESHOLD   = 120;
+const int LED_HOLD_FRAMES = 5;
+
+int ledHoldTimer = 0;
+
+// --- Per-bar scaling (fake spectrum look) ---
+float barMultipliers[NUM_BARS] = {0.60, 0.80, 1.00, 0.90, 0.70, 0.85, 0.95, 0.75};
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+
+  display.begin();
+  display.setRotation(2);          // <- flipped 180° for upside-down LCD
+  display.setContrast(50);
+  display.clearDisplay();
+  display.display();
+
+  randomSeed(analogRead(A0));
+}
+
+void loop() {
+  // ---------- 1. Read mic ----------
+  int raw = analogRead(MIC_PIN);
+  if (raw < NOISE_FLOOR) raw = 0;
+
+  // ---------- 2. Update bars ----------
+  for (int i = 0; i < NUM_BARS; i++) {
+    int scaled = (int)(raw * barMultipliers[i]);
+    int targetHeight = map(scaled, 0, MAP_MAX_RAW, 0, BAR_MAX_HEIGHT);
+    targetHeight = constrain(targetHeight, 0, BAR_MAX_HEIGHT);
+
+    if (targetHeight > barHeights[i]) {
+      barHeights[i] = targetHeight;
+    } else {
+      barHeights[i] -= DECAY_RATE;
+      if (barHeights[i] < 0) barHeights[i] = 0;
+    }
+
+    if (barHeights[i] > peakHeights[i]) {
+      peakHeights[i] = barHeights[i];
+      peakTimers[i] = PEAK_HOLD_TIME;
+    } else if (peakTimers[i] > 0) {
+      peakTimers[i]--;
+    } else if (peakHeights[i] > barHeights[i]) {
+      peakHeights[i] -= PEAK_DECAY_RATE;
+      if (peakHeights[i] < barHeights[i]) peakHeights[i] = barHeights[i];
+    }
+  }
+
+  // ---------- 3. Update LED ----------
+  if (raw > LED_THRESHOLD) {
+    digitalWrite(LED_PIN, HIGH);
+    ledHoldTimer = LED_HOLD_FRAMES;
+  } else if (ledHoldTimer > 0) {
+    ledHoldTimer--;
+  } else {
+    digitalWrite(LED_PIN, LOW);
+  }
+
+  // ---------- 4. Render ----------
+  display.clearDisplay();
+
+  for (int i = 0; i < NUM_BARS; i++) {
+    int x = i * (BAR_WIDTH + BAR_SPACING);
+    int barY = BASELINE_Y - barHeights[i];
+
+    if (barHeights[i] > 0) {
+      display.fillRect(x, barY, BAR_WIDTH, barHeights[i], BLACK);
+    }
+
+    int peakY = BASELINE_Y - peakHeights[i] - 2;
+    if (peakHeights[i] > 0 && peakY > 0) {
+      display.fillRect(x, peakY, BAR_WIDTH, 2, BLACK);
+    }
+  }
+
+  display.display();
+  delay(30);
+}
